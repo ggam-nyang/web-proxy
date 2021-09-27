@@ -11,14 +11,12 @@
 void doit(int fd);
 void read_requesthdrs(rio_t *rp);
 int parse_uri(char *uri, char *filename, char *cgiargs);
-void serve_static(int fd, char *filename, int filesize);
+void serve_static(int fd, char *filename, int filesize, char *method);
 void get_filetype(char *filename, char *filetype);
-void serve_dynamic(int fd, char *filename, char *cgiargs);
+void serve_dynamic(int fd, char *filename, char *cgiargs, char *method);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg);
-
-void serve_static_head(int fd, char *filename, int filesize);
-
+void *thread(void *vargp);
 
 
 int main(int argc, char **argv) {
@@ -26,6 +24,8 @@ int main(int argc, char **argv) {
   char hostname[MAXLINE], port[MAXLINE];
   socklen_t clientlen;
   struct sockaddr_storage clientaddr;
+  pthread_t tid;
+
 
   /* Check command line args */
   if (argc != 2) {
@@ -35,16 +35,26 @@ int main(int argc, char **argv) {
 
   listenfd = Open_listenfd(argv[1]);
   while (1) {
-    clientlen = sizeof(clientaddr);
+    clientlen = sizeof(clientaddr); // 왜 반복문 안에??
     connfd = Accept(listenfd, (SA *)&clientaddr,
                     &clientlen);  // line:netp:tiny:accept
     Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE,
                 0);
     printf("Accepted connection from (%s, %s)\n", hostname, port);
-    doit(connfd);   // line:netp:tiny:doit
-    Close(connfd);  // line:netp:tiny:close
+    // doit(connfd);
+    // Close(connfd);
+    // 멀티 쓰레드를 위한 쓰레드 생성
+    Pthread_create(&tid, NULL, thread, (void *)connfd);
   }
 }
+
+void *thread(void *vargp) {
+  int connfd = (int)vargp;
+  Pthread_detach(pthread_self());
+  doit(connfd);
+  Close(connfd);
+}
+
 void doit(int fd)
 {
   int is_static;
@@ -60,8 +70,8 @@ void doit(int fd)
   printf("%s", buf);
   sscanf(buf, "%s %s %s", method, uri, version);
   // GET 메소드만 받겠다!!
-  if (strcasecmp(method, "GET") == 0) {
-    read_requesthdrs(&rio); // 다른 요청 헤더를 무시한다.
+  if (strcasecmp(method, "GET") == 0 || strcasecmp(method, "HEAD") == 0) {
+    read_requesthdrs(&rio); // 다른 요청 헤더를 무시한다?? 다 읽는다??
 
     // GET 요청으로부터 URI를 가져온다.
     is_static = parse_uri(uri, filename, cgiargs);
@@ -75,39 +85,14 @@ void doit(int fd)
         clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't read the file");
         return;
       }
-      serve_static(fd, filename, sbuf.st_size); // 정적 콘텐츠 클라이언트에게 제공
+      serve_static(fd, filename, sbuf.st_size, method); // 정적 콘텐츠 클라이언트에게 제공
     }
     else {
       if (!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)) {
         clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't read the file");
         return;
       }
-      serve_dynamic(fd, filename, cgiargs); // 동적 콘텐츠 클라이언트에게 제공
-    }
-  }
-  else if (strcasecmp(method, "HEAD") == 0) {
-    read_requesthdrs(&rio); // 다른 요청 헤더를 무시한다.
-
-    // HEAD 요청으로부터 URI를 가져온다.
-    is_static = parse_uri(uri, filename, cgiargs);
-    if (stat(filename, &sbuf) < 0) {
-      clienterror(fd, filename, "404", "Not found", "Tiny couldn't find this file");
-      return ;
-    }
-    // 보통 파일이고 읽기 권한이 있는지!
-    if (is_static) {
-      if (!(S_ISREG(sbuf.st_mode)) || !(S_IRUSR & sbuf.st_mode)) {
-        clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't read the file");
-        return;
-      }
-      serve_static_head(fd, filename, sbuf.st_size); // 정적 콘텐츠 클라이언트에게 제공
-    }
-    else {
-      if (!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)) {
-        clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't read the file");
-        return;
-      }
-      serve_dynamic(fd, filename, cgiargs); // 동적 콘텐츠 클라이언트에게 제공
+      serve_dynamic(fd, filename, cgiargs, method); // 동적 콘텐츠 클라이언트에게 제공
     }
   }
 
@@ -179,7 +164,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs)
   }
 }
 
-void serve_static(int fd, char *filename, int filesize)
+void serve_static(int fd, char *filename, int filesize, char *method)
 {
   int srcfd;
   char *srcp, filetype[MAXLINE], buf[MAXBUF];
@@ -195,17 +180,20 @@ void serve_static(int fd, char *filename, int filesize)
   printf("Response headers: \n");
   printf("%s", buf);
   
-  srcfd = Open(filename, O_RDONLY, 0);
-  srcp = (char *)malloc(filesize);
-  Rio_readn(srcfd, srcp, filesize);
-  // srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0); // MMap, Munmap 방식의 장/단점을 고민해보자 (brk랑 mmap)!!!
-  Close(srcfd);
-  Rio_writen(fd, srcp, filesize);
-  // Munmap(srcp, filesize);
-  free(srcp);
+
+  if (strcasecmp(method, "HEAD")) {
+    srcfd = Open(filename, O_RDONLY, 0);
+    srcp = (char *)malloc(filesize);
+    Rio_readn(srcfd, srcp, filesize);
+    // srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0); // MMap, Munmap 방식의 장/단점을 고민해보자 (brk랑 mmap)!!!
+    Close(srcfd );
+    Rio_writen(fd, srcp, filesize);
+    // Munmap(srcp, filesize);
+    free(srcp);
+  }
 }
 
-void serve_dynamic(int fd, char *filename, char *cgiargs)
+void serve_dynamic(int fd, char *filename, char *cgiargs, char *method)
 {
   char buf[MAXLINE], *emptylist[] = { NULL };
 
@@ -216,28 +204,14 @@ void serve_dynamic(int fd, char *filename, char *cgiargs)
 
   if (Fork() == 0) {
     setenv("QUERY_STRING", cgiargs, 1); // QUERY_STRING 환경변수를 URI의 CGI 인자들로 초기화한다!!!
+    setenv("REQUEST_METHOD", method, 1); // HEAD method를 위해서!!
     Dup2(fd, STDOUT_FILENO); // STDOUT_FILENO를 가르키던 애가 fd를 가르키게 됨, 이게 자식프로세스가 fd를 가르키게 하는 것
     Execve(filename, emptylist, environ); // CGI 프로그램을 로드하고 실행. filename의 실행코드를 현재 프로세스에 적재하여, 교체하고 새로운 기능으로 실행!!!
   }
   Wait(NULL);
 }
 
-void serve_static_head(int fd, char *filename, int filesize)
-{
-  int srcfd;
-  char *srcp, filetype[MAXLINE], buf[MAXBUF];
 
-  // client에게 response headers 보내기
-  get_filetype(filename, filetype);
-  sprintf(buf, "HTTP/1.0 200 OK\r\n");
-  sprintf(buf, "%sServer: Tiny Web Server\r\n", buf);
-  sprintf(buf, "%sConnection: close\r\n", buf);
-  sprintf(buf, "%sContent-length: %d\r\n", buf, filesize);
-  sprintf(buf, "%sContent-type: %s\r\n\r\n", buf, filetype);
-  Rio_writen(fd, buf, strlen(buf));
-  printf("Response headers: \n");
-  printf("%s", buf);
-}
 
 
 void get_filetype(char *filename, char *filetype)

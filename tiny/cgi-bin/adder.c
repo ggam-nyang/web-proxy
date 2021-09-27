@@ -5,7 +5,7 @@
 #include "csapp.h"
 
 int main(void) {
-  char *buf, *p;
+  char *buf, *p, *method;
   char arg1[MAXLINE], arg2[MAXLINE], content[MAXLINE];
   int n1 = 0, n2 = 0;
 
@@ -14,6 +14,7 @@ int main(void) {
     *p = '\0';
     strcpy(arg1, buf + 5);
     strcpy(arg2, p + 6);
+    // sscanf(buf, "first%d", &n1)
     n1 = atoi(arg1);
     n2 = atoi(arg2);
   }
@@ -28,7 +29,11 @@ int main(void) {
   printf("Connection: close\r\n");
   printf("Content-length: %d\r\n", (int)strlen(content));
   printf("Content-type: text/html\r\n\r\n");
-  printf("%s", content);
+  
+  method = getenv("REQUEST_METHOD");
+  if (strcasecmp(method, "HEAD") != 0)
+    printf("%s", content);
+  
   fflush(stdout);
   
   exit(0);
